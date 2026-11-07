@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# run mosaic from wherever the repo lives (uses system python: it needs the distro's gi/GTK/GStreamer)
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+cd "$here" && exec /usr/bin/python3 -m mosaic "$@"

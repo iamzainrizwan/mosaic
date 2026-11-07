@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=mosaic
+Comment=Tile live app windows onto one stage and screenshare it
+Exec=mosaic
+Icon=io.github.iamzainrizwan.mosaic
+Terminal=false
+Categories=AudioVideo;Video;Utility;
+Keywords=screenshare;screencast;tile;windows;obs;
+StartupWMClass=io.github.iamzainrizwan.mosaic
