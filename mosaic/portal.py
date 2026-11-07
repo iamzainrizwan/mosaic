@@ -67,7 +67,10 @@ class ScreenCast:
 
     # ---- the flow: CreateSession -> SelectSources -> Start -> OpenPipeWireRemote ----
     def start(self, restore_token: str, on_ready, on_fail) -> None:
-        """on_ready(streams: list[(node_id, props)], fd: int, new_token: str); on_fail(msg)."""
+        """on_ready(streams: list[(node_id, props)], open_remote, new_token: str); on_fail(msg).
+
+        open_remote() returns a fresh PipeWire fd. Call it once per stream: pipewire
+        clients can't share one connection (a shared fd corrupts the protocol and hangs)."""
 
         def created(ok, res):
             if not ok:
@@ -95,12 +98,7 @@ class ScreenCast:
         def started(ok, res):
             if not ok:
                 return on_fail(res.get("error", "window picking was cancelled"))
-            streams = res.get("streams", [])
-            try:
-                fd = self._open_remote()
-            except GLib.Error as e:
-                return on_fail(e.message)
-            on_ready(streams, fd, res.get("restore_token", ""))
+            on_ready(res.get("streams", []), self._open_remote, res.get("restore_token", ""))
 
         self._request("CreateSession", lambda t: GLib.Variant("(a{sv})", ({
             "handle_token": GLib.Variant("s", t),

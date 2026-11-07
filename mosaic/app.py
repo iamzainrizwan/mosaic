@@ -77,18 +77,23 @@ class Ctx:
         cast = ScreenCast()
         self.casts[sess.id] = cast
 
-        def ready(streams, fd, token):
+        def ready(streams, open_remote, token):
             sess.token = token or sess.token
             for i, (node_id, _props) in enumerate(streams):
                 while len(sess.names) <= i:
                     sess.names.append(f"window {self.state.next_window_number()}")
                 if i in sess.hidden:
                     continue
+                try:
+                    fd = open_remote()  # one pipewire connection per window
+                except GLib.Error as e:
+                    self.toast(f"couldn't open {sess.names[i]}: {e.message}")
+                    continue
                 st = Stream(sess.src_id(i), fd, node_id)
+                os.close(fd)
                 st.connect("frame", self._on_frame)
                 st.connect("ended", self._on_ended)
                 self.streams[st.src_id] = st
-            os.close(fd)
             if sess not in self.state.sessions:
                 self.state.sessions.append(sess)
             self.state.save()

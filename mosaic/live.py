@@ -74,7 +74,7 @@ class Stream(GObject.Object):
         self._scheduled = False
         self._caps = None
         self._info = None
-        # each pipewiresrc gets its own dup of the remote fd: it closes it on teardown
+        # pipewiresrc gets its own dup of this window's remote fd (caller closes the original)
         self.pipeline = Gst.parse_launch(
             f"pipewiresrc fd={os.dup(fd)} path={node_id} do-timestamp=true keepalive-time=1000 "
             "! videoconvert ! video/x-raw,format=BGRA "
