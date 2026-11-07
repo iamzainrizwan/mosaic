@@ -44,25 +44,19 @@ class Geometry(unittest.TestCase):
         self.assertEqual(lay.hit(1500, 900), -1)
 
 
-class Naming(unittest.TestCase):
-    WINS = [
-        {"title": "Desmos | Graphing", "app": "Zen", "frame": [1704, 1065], "buffer": [1756, 1117], "scale": 1},
-        {"title": "deck.pptx - ONLYOFFICE", "app": "ONLYOFFICE", "frame": [1920, 1080], "buffer": [1920, 1080], "scale": 1},
-        {"title": "tm tutoring", "app": "kitty", "frame": [800, 600], "buffer": [800, 600], "scale": 2},
-    ]
+class LookMatching(unittest.TestCase):
+    def test_picks_closest_one_to_one(self):
+        n = model.THUMB_W * model.THUMB_H
+        dark, light, mid = [20] * n, [230] * n, [120] * n
+        thumbs = [("meet", dark), ("desmos", light), ("paper", mid)]
+        got = model.match_by_look({"s:0": [25] * n, "s:1": [225] * n}, thumbs)
+        self.assertEqual(got, {"s:0": "meet", "s:1": "desmos"})
 
-    def test_unique_size_match(self):
-        self.assertEqual(model.match_window([1704, 1065], self.WINS), "Desmos | Graphing")
-        self.assertEqual(model.match_window([1756, 1117], self.WINS), "Desmos | Graphing")  # buffer size
-        self.assertEqual(model.match_window([1600, 1200], self.WINS), "tm tutoring")        # hidpi
-        self.assertEqual(model.match_window([1703, 1066], self.WINS), "Desmos | Graphing")  # tolerance
-
-    def test_ambiguous_or_missing(self):
-        twins = self.WINS + [{"title": "other", "frame": [1920, 1080], "buffer": [1920, 1080]}]
-        self.assertEqual(model.match_window([1920, 1080], twins), "")
-        self.assertEqual(model.match_window([10, 10], self.WINS), "")
-        self.assertEqual(model.match_window(None, self.WINS), "")
-        self.assertEqual(model.match_window([1704, 1065], []), "")
+    def test_refuses_when_unsure(self):
+        n = model.THUMB_W * model.THUMB_H
+        thumbs = [("a", [100] * n), ("b", [102] * n)]
+        self.assertEqual(model.match_by_look({"s:0": [101] * n}, thumbs), {})  # too close to call
+        self.assertEqual(model.match_by_look({"s:0": [250] * n}, [("a", [0] * n)]), {})  # too different
 
 
 class Persistence(unittest.TestCase):

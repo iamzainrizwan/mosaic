@@ -22,6 +22,8 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
+gi.require_version("Graphene", "1.0")
+gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GLib, GObject, Graphene, Gst, GstVideo  # noqa: E402
 
 Gst.init(None)
@@ -42,6 +44,14 @@ _GDK_FORMAT = {
     GstVideo.VideoFormat.BGRX: Gdk.MemoryFormat.B8G8R8X8,
     GstVideo.VideoFormat.BGRA: Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
 }
+
+
+def pixbuf_grey(pb) -> list[int]:
+    """Greyscale values of a small pixbuf, row by row."""
+    w, h, n, rs = pb.get_width(), pb.get_height(), pb.get_n_channels(), pb.get_rowstride()
+    px = pb.get_pixels()
+    return [(px[y * rs + x * n] * 3 + px[y * rs + x * n + 1] * 6 + px[y * rs + x * n + 2]) // 10
+            for y in range(h) for x in range(w)]
 
 
 class LivePaintable(GObject.Object, Gdk.Paintable):
@@ -156,8 +166,24 @@ class Stream(GObject.Object):
         if not self.alive or on == self.active:
             return
         self.active = on
+        if not on and not self._got_frame:
+            self._one_shot = True  # keep going until the first frame, then pause
+            return
         self._one_shot = False
         self.pipeline.set_state(Gst.State.PLAYING if on else Gst.State.PAUSED)
+
+    def grey_thumb(self, w: int, h: int) -> list[int] | None:
+        """Current frame squashed to w x h greyscale (for matching against window thumbnails)."""
+        tex = self.paintable.tex
+        if tex is None:
+            return None
+        from gi.repository import GdkPixbuf
+        dl = Gdk.TextureDownloader.new(tex)
+        dl.set_format(Gdk.MemoryFormat.R8G8B8A8)
+        data, stride = dl.download_bytes()
+        pb = GdkPixbuf.Pixbuf.new_from_bytes(data, GdkPixbuf.Colorspace.RGB, True, 8,
+                                             tex.get_width(), tex.get_height(), stride)
+        return pixbuf_grey(pb.scale_simple(w, h, GdkPixbuf.InterpType.HYPER))
 
     def snapshot(self) -> None:
         """Grab a single fresh frame for a paused (off-stage) window's thumbnail."""

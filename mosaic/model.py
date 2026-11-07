@@ -218,22 +218,30 @@ def fit_contain(pw: float, ph: float, w: float, h: float) -> tuple[float, float,
     return (w - dw) / 2, (h - dh) / 2, dw, dh
 
 
-def match_window(size, windows: list[dict], tol: int = 2) -> str:
-    """Name for a captured window of `size` (from the portal), given the open windows
-    listed by the mosaic-windows shell extension. "" if no single clear match."""
-    if not size or len(size) != 2:
-        return ""
-    W, H = size
+THUMB_W, THUMB_H = 64, 40
 
-    def fits(w: dict) -> bool:
-        k = w.get("scale") or 1
-        for key in ("frame", "buffer"):
-            ww, hh = w.get(key) or (0, 0)
-            for mult in (1, k):
-                if abs(ww * mult - W) <= tol and abs(hh * mult - H) <= tol:
-                    return True
-        return False
 
-    names = {(w.get("title") or w.get("app") or "").strip() for w in windows if fits(w)}
-    names.discard("")
-    return names.pop() if len(names) == 1 else ""
+def match_by_look(frames: dict[str, list[int]], thumbs: list[tuple[str, list[int]]],
+                  max_diff: float = 40.0, margin: float = 4.0) -> dict[str, str]:
+    """Name captures by comparing their first frame with each open window's thumbnail.
+
+    frames: src id -> THUMB_W*THUMB_H greyscale values; thumbs: (window name, same).
+    Greedy one-to-one on mean absolute difference; a capture only gets a name when
+    its best match is close (< max_diff) and clearly ahead of the runner-up (> margin)."""
+    def diff(a, b):
+        return sum(abs(x - y) for x, y in zip(a, b)) / max(1, len(a))
+
+    scored = []
+    for src, f in frames.items():
+        ds = sorted((diff(f, t), i) for i, (_n, t) in enumerate(thumbs) if len(t) == len(f))
+        if not ds or ds[0][0] > max_diff:
+            continue
+        if len(ds) > 1 and ds[1][0] - ds[0][0] < margin:
+            continue
+        scored.append((ds[0][0], src, ds[0][1]))
+    out, used = {}, set()
+    for _d, src, i in sorted(scored):
+        if i not in used and src not in out:
+            out[src] = thumbs[i][0]
+            used.add(i)
+    return out

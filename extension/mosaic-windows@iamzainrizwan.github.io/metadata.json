@@ -4,5 +4,5 @@
   "description": "Lets mosaic name the windows you capture: exposes open windows' titles, apps and sizes over D-Bus.",
   "shell-version": ["45", "46", "47", "48"],
   "url": "https://github.com/iamzainrizwan/mosaic",
-  "version": 1
+  "version": 2
 }

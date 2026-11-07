@@ -16,11 +16,12 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from . import model  # noqa: E402
 from .canvas import Canvas  # noqa: E402
-from .live import Stream  # noqa: E402
+from .live import Stream, pixbuf_grey  # noqa: E402
 from .portal import ScreenCast  # noqa: E402
 
 APP_ID = "io.github.iamzainrizwan.mosaic"
@@ -39,13 +40,14 @@ def title_of(props: dict) -> str:
     return ""
 
 
-def open_windows() -> list[dict]:
+def open_windows(thumbs: bool = False) -> list[dict]:
     """Open windows from the mosaic-windows shell extension ([] if it isn't enabled)."""
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         v = bus.call_sync("org.gnome.Shell", "/io/github/iamzainrizwan/Mosaic",
-                          "io.github.iamzainrizwan.Mosaic", "GetWindows", None,
-                          GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 500, None)
+                          "io.github.iamzainrizwan.Mosaic",
+                          "GetWindowsWithThumbs" if thumbs else "GetWindows", None,
+                          GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 3000, None)
         return json.loads(v.unpack()[0])
     except (GLib.Error, ValueError):
         return []
@@ -137,11 +139,13 @@ class Ctx:
         def ready(streams, open_remote, token):
             sess.token = token or sess.token
             log_portal_reply(streams, restoring)
-            wins = open_windows() if len(sess.names) < len(streams) else []
+            unnamed = []
             for i, (node_id, props) in enumerate(streams):
                 while len(sess.names) <= i:
-                    sess.names.append(title_of(props) or model.match_window(props.get("size"), wins)
-                                      or f"window {self.state.next_window_number()}")
+                    title = title_of(props)
+                    sess.names.append(title or f"window {self.state.next_window_number()}")
+                    if not title:
+                        unnamed.append(sess.src_id(len(sess.names) - 1))
                 if i in sess.hidden:
                     continue
                 try:
@@ -158,6 +162,8 @@ class Ctx:
                 self.state.sessions.append(sess)
             self.state.save()
             self.pool_changed()
+            if unnamed:
+                self._name_when_ready(unnamed)
 
         def fail(msg):
             self.casts.pop(sess.id, None)
@@ -189,6 +195,34 @@ class Ctx:
                 self.state.sessions.remove(sess)
         self.state.save()
         self.pool_changed()
+
+    def _name_when_ready(self, srcs: list[str], tries: int = 0) -> bool:
+        """Once the new captures have a frame, match them to open windows by how they look."""
+        live = [s for s in srcs if s in self.streams]
+        waiting = [s for s in live if self.streams[s].paintable.tex is None]
+        if waiting and tries < 12:  # up to ~6s for first frames
+            GLib.timeout_add(500, self._name_when_ready, srcs, tries + 1)
+            return GLib.SOURCE_REMOVE
+        try:
+            frames = {s: self.streams[s].grey_thumb(model.THUMB_W, model.THUMB_H) for s in live}
+            frames = {s: f for s, f in frames.items() if f}
+            thumbs = []
+            for w in open_windows(thumbs=True):
+                path, name = w.get("thumb"), (w.get("title") or w.get("app") or "").strip()
+                if path and name and w.get("app_id") != f"{APP_ID}.desktop":
+                    thumbs.append((name, pixbuf_grey(GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                        path, model.THUMB_W, model.THUMB_H, False))))
+            names = model.match_by_look(frames, thumbs)
+        except (GLib.Error, ValueError, TypeError) as e:
+            print("naming by look failed:", e, file=sys.stderr)
+            return GLib.SOURCE_REMOVE
+        for src, name in names.items():
+            if self.state.name_of(src).startswith("window "):  # don't clobber a rename
+                self.state.rename(src, name)
+        if names:
+            self.state.save()
+            self.pool_changed()
+        return GLib.SOURCE_REMOVE
 
     def _on_frame(self, st: Stream) -> None:
         if any(t.src == st.src_id for t in self.state.layout().tiles):

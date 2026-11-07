@@ -26,20 +26,27 @@ mosaic
 
 or without installing: `python3 -m mosaic` from the repo.
 
-**window names:** GNOME's picker doesn't tell apps which window you chose, only its
-size. `install.sh` also installs a tiny shell extension (`extension/`) that lists open
-windows over D-Bus, and mosaic names each new capture by matching sizes. On Wayland
-a new extension only loads after you log out and back in once; run `./install.sh`
-again after that to enable it. Without it, windows are "window 1, 2, …" and you
-rename them in the pool. Note: GNOME 46's picker takes one window per pick.
+**window names:** GNOME's picker never tells apps which window you chose (on GNOME 46
+even the size it reports is just the monitor's). `install.sh` also installs a tiny shell
+extension (`extension/`) that lists open windows with a small thumbnail of each over
+D-Bus, and mosaic names each new capture by matching its first frame against those
+thumbnails. On Wayland a new or updated extension only loads after you log out and back
+in once. Without it, windows are "window 1, 2, …" and you rename them in the pool.
 
 ## use
 
-1. open the apps you want to show, then **add windows** once per window
+1. open the apps you want to show, then **add windows** and tick them all (the
+   picker allows several at once)
 2. drag windows from the pool onto the stage. drag to move, pull the bottom-right
    corner to resize. tiles snap to edges, thirds, the centre and each other
 3. make more layouts (new / duplicate) and click between them
-4. send **mosaic output** to another workspace, F11, share that window
+4. pick an output size in the header (1920×1080 or 1280×720, in real screen pixels),
+   drag the output window to another workspace and share it. it has no title bar, so
+   the share is only the stage: drag anywhere on it to move it, double-click or F11 for
+   fullscreen
+
+windows that aren't on the current layout pause (their pool thumbnails refresh every
+few seconds); the ones on stage capture at up to 30fps.
 
 state lives in `~/.config/mosaic/state.json`.
 
