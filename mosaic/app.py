@@ -6,8 +6,10 @@ Two windows:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
 
 import gi
 
@@ -22,6 +24,32 @@ from .live import Stream  # noqa: E402
 from .portal import ScreenCast  # noqa: E402
 
 APP_ID = "io.github.iamzainrizwan.mosaic"
+
+
+PORTAL_LOG = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "mosaic", "portal.log")
+
+
+def title_of(props: dict) -> str:
+    """A window name from the portal's stream props, if GNOME ever sends one."""
+    for key in ("title", "window_title", "name", "app_name", "app_id"):
+        v = props.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def log_portal_reply(streams, restoring: bool) -> None:
+    """Record exactly what the portal hands back per stream (to see what naming info exists)."""
+    entry = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "restoring": restoring,
+             "streams": [{"node_id": n, "props": p} for n, p in streams]}
+    line = json.dumps(entry, default=repr)
+    print("portal reply:", line, file=sys.stderr)
+    try:
+        os.makedirs(os.path.dirname(PORTAL_LOG), exist_ok=True)
+        with open(PORTAL_LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 CSS = """
 .poolcard { padding: 8px; border-radius: 10px; background: alpha(currentColor, 0.06); }
@@ -79,9 +107,10 @@ class Ctx:
 
         def ready(streams, open_remote, token):
             sess.token = token or sess.token
-            for i, (node_id, _props) in enumerate(streams):
+            log_portal_reply(streams, restoring)
+            for i, (node_id, props) in enumerate(streams):
                 while len(sess.names) <= i:
-                    sess.names.append(f"window {self.state.next_window_number()}")
+                    sess.names.append(title_of(props) or f"window {self.state.next_window_number()}")
                 if i in sess.hidden:
                     continue
                 try:
