@@ -4,8 +4,18 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
 ln -sf "$here/bin/mosaic" ~/.local/bin/mosaic
-cp "$here/data/io.github.iamzainrizwan.mosaic.desktop" ~/.local/share/applications/
+# absolute Exec: GNOME's session PATH doesn't always include ~/.local/bin
+sed "s#^Exec=mosaic#Exec=$HOME/.local/bin/mosaic#" "$here/data/io.github.iamzainrizwan.mosaic.desktop" \
+  > ~/.local/share/applications/io.github.iamzainrizwan.mosaic.desktop
 cp "$here/data/io.github.iamzainrizwan.mosaic.svg" ~/.local/share/icons/hicolor/scalable/apps/
+if command -v rsvg-convert >/dev/null; then  # pngs too, for anything that skips svg
+  for s in 32 48 64 128 256; do
+    mkdir -p ~/.local/share/icons/hicolor/${s}x${s}/apps
+    rsvg-convert -w $s -h $s "$here/data/io.github.iamzainrizwan.mosaic.svg" \
+      -o ~/.local/share/icons/hicolor/${s}x${s}/apps/io.github.iamzainrizwan.mosaic.png
+  done
+fi
+touch ~/.local/share/icons/hicolor  # nudge the icon theme to rescan
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 # shell extension that lets mosaic name captured windows (GNOME only)

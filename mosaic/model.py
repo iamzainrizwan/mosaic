@@ -67,6 +67,7 @@ class State:
     sessions: list[Session] = field(default_factory=list)
     layouts: list[Layout] = field(default_factory=lambda: [Layout(name="layout 1")])
     current: str = ""
+    output: str = "1080"   # output window size: "1080", "720" or "full"
 
     # ---- lookup ----
     def layout(self) -> Layout:
@@ -140,6 +141,7 @@ class State:
             layouts=[Layout(id=l["id"], name=l["name"], tiles=[Tile(**t) for t in l["tiles"]])
                      for l in d.get("layouts", [])] or [Layout(name="layout 1")],
             current=d.get("current", ""),
+            output=d.get("output", "1080"),
         )
         st.layout()  # fixes a dangling current id
         return st

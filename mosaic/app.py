@@ -85,12 +85,26 @@ class Ctx:
         self.on_pool = []     # callbacks()
         self.on_layouts = []  # callbacks()
         self.toast = lambda msg: print(msg, file=sys.stderr)
+        GLib.timeout_add_seconds(5, self._refresh_thumbs)
+
+    def update_activity(self) -> None:
+        """Only windows on the current layout capture at full rate; the rest pause."""
+        on_stage = {t.src for t in self.state.layout().tiles}
+        for src, st in self.streams.items():
+            st.set_active(src in on_stage)
+
+    def _refresh_thumbs(self) -> bool:
+        for st in self.streams.values():
+            if not st.active:
+                st.snapshot()
+        return GLib.SOURCE_CONTINUE
 
     def redraw(self) -> None:
         for c in self.canvases:
             c.queue_draw()
 
     def changed(self, save: bool = True) -> None:
+        self.update_activity()
         self.redraw()
         if save:
             self.state.save()
@@ -103,12 +117,14 @@ class Ctx:
 
     def layouts_changed(self) -> None:
         self.selected = -1
+        self.update_activity()
         self.state.save()
         self.redraw()
         for cb in self.on_layouts + self.on_select:
             cb()
 
     def pool_changed(self) -> None:
+        self.update_activity()
         self.redraw()
         for cb in self.on_pool:
             cb()
@@ -186,10 +202,19 @@ class Ctx:
 
 # ---------------------------------------------------------------- output window
 
+OUTPUT_SIZES = {"1080": (1920, 1080), "720": (1280, 720)}
+OUTPUT_LABELS = [("1080", "Output 1920×1080"), ("720", "Output 1280×720"), ("full", "Output fullscreen")]
+
+
 class OutputWindow(Gtk.Window):
+    """The clean stage you share. No title bar, so the share is only the stage.
+
+    Drag anywhere to move it (or Super+drag), double-click or F11 for fullscreen.
+    Sizes are in real screen pixels, so Meet captures exactly 1920x1080 / 1280x720."""
+
     def __init__(self, app: Adw.Application, ctx: Ctx) -> None:
-        super().__init__(application=app, title="mosaic output")
-        self.set_default_size(1280, 720)
+        super().__init__(application=app, title="mosaic output", decorated=False)
+        self.ctx = ctx
         self.set_hide_on_close(True)
         canvas = Canvas(ctx, editable=False)
         ctx.canvases.append(canvas)
@@ -200,6 +225,37 @@ class OutputWindow(Gtk.Window):
         dbl = Gtk.GestureClick()
         dbl.connect("pressed", lambda _g, n, *_: n == 2 and self.toggle_fs())
         canvas.add_controller(dbl)
+        move = Gtk.GestureDrag()
+        self._moving = False
+        move.connect("drag-update", self._drag)
+        move.connect("drag-end", lambda *_: setattr(self, "_moving", False))
+        move.connect("cancel", lambda *_: setattr(self, "_moving", False))
+        canvas.add_controller(move)
+        w, h = OUTPUT_SIZES.get(ctx.state.output, OUTPUT_SIZES["1080"])
+        self.set_default_size(w, h)
+        self.connect("realize", lambda *_: GLib.idle_add(self.apply_size, ctx.state.output))
+
+    def _drag(self, g: Gtk.GestureDrag, dx, dy) -> None:
+        if abs(dx) + abs(dy) < 6 or self.is_fullscreen():
+            return
+        ok, x, y = g.get_start_point()
+        surface = self.get_surface()
+        if ok and surface is not None and not self._moving:
+            self._moving = True  # the compositor owns the pointer until release
+            surface.begin_move(g.get_device(), g.get_current_button() or 1, x, y,
+                               g.get_current_event_time())
+
+    def apply_size(self, key: str) -> bool:
+        if key == "full":
+            self.fullscreen()
+            return GLib.SOURCE_REMOVE
+        self.unfullscreen()
+        self.unmaximize()
+        w, h = OUTPUT_SIZES.get(key, OUTPUT_SIZES["1080"])
+        surface = self.get_surface()
+        scale = surface.get_scale() if surface is not None else 1.0  # fractional scaling aware
+        self.set_default_size(round(w / scale), round(h / scale))
+        return GLib.SOURCE_REMOVE
 
     def toggle_fs(self) -> None:
         self.unfullscreen() if self.is_fullscreen() else self.fullscreen()
@@ -239,6 +295,19 @@ class ControlWindow(Adw.ApplicationWindow):
         header.pack_start(add)
         header.pack_end(_icon_button("video-display-symbolic", "Show the output window (share that one)",
                                      output.present))
+        sizes = Gtk.DropDown.new_from_strings([label for _k, label in OUTPUT_LABELS])
+        sizes.set_tooltip_text("Size of the output window you share: smaller = lighter on Meet")
+        keys_ = [k for k, _l in OUTPUT_LABELS]
+        sizes.set_selected(keys_.index(ctx.state.output) if ctx.state.output in keys_ else 0)
+
+        def size_picked(dd, _p):
+            ctx.state.output = keys_[dd.get_selected()]
+            ctx.state.save()
+            output.apply_size(ctx.state.output)
+            output.present()
+
+        sizes.connect("notify::selected", size_picked)
+        header.pack_end(sizes)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         body.append(self._sidebar())

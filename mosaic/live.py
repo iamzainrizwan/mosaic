@@ -1,11 +1,20 @@
 """One captured window: a pipewiresrc pipeline feeding a shared Gdk.Paintable.
 
 The same paintable is drawn by the pool thumbnail, the preview and the output,
-so each frame is decoded once and only re-drawn by GTK.
+so each frame is copied once and only re-drawn by GTK.
+
+Cost control:
+  - frames come straight from PipeWire as BGRx/BGRA, no videoconvert pass
+    (falls back to videoconvert only if the compositor offers something else)
+  - at most MAX_FPS frames per second are copied; the rest are dropped before
+    any copy happens
+  - windows that aren't on the stage are paused (PipeWire stops asking GNOME
+    to render them) and only grab a single frame now and then for the pool
 """
 from __future__ import annotations
 
 import os
+import time
 
 import gi
 
@@ -17,8 +26,22 @@ from gi.repository import Gdk, GLib, GObject, Graphene, Gst, GstVideo  # noqa: E
 
 Gst.init(None)
 
+MAX_FPS = 30
+
 _PLACEHOLDER = Gdk.RGBA()
 _PLACEHOLDER.parse("#2a2c33")
+
+_FAST = ("pipewiresrc fd={fd} path={node} do-timestamp=true keepalive-time=1000 "
+         "! video/x-raw,format=(string){{BGRx,BGRA}} "
+         "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+_SLOW = ("pipewiresrc fd={fd} path={node} do-timestamp=true keepalive-time=1000 "
+         "! videoconvert ! video/x-raw,format=BGRA "
+         "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+
+_GDK_FORMAT = {
+    GstVideo.VideoFormat.BGRX: Gdk.MemoryFormat.B8G8R8X8,
+    GstVideo.VideoFormat.BGRA: Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+}
 
 
 class LivePaintable(GObject.Object, Gdk.Paintable):
@@ -70,49 +93,90 @@ class Stream(GObject.Object):
         self.src_id = src_id
         self.paintable = LivePaintable()
         self.alive = True
+        self.active = True        # on the stage: full rate. off: paused, occasional snapshot
+        self._one_shot = False
         self._pending: Gdk.Texture | None = None
         self._scheduled = False
         self._caps = None
         self._info = None
-        # pipewiresrc gets its own dup of this window's remote fd (caller closes the original)
-        self.pipeline = Gst.parse_launch(
-            f"pipewiresrc fd={os.dup(fd)} path={node_id} do-timestamp=true keepalive-time=1000 "
-            "! videoconvert ! video/x-raw,format=BGRA "
-            "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
-        sink = self.pipeline.get_by_name("sink")
-        sink.connect("new-sample", self._on_sample)
+        self._fmt = None
+        self._last = 0.0
+        self._got_frame = False
+        self._node = node_id
+        self._spare_fd = os.dup(fd)  # kept for one rebuild with videoconvert, if needed
+        self.pipeline = None
+        self._build(_FAST, os.dup(fd))
+
+    def _build(self, template: str, fd: int) -> None:
+        self.pipeline = Gst.parse_launch(template.format(fd=fd, node=self._node))
+        self.pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
-        bus.connect("message::error", self._on_end)
+        bus.connect("message::error", self._on_error)
         bus.connect("message::eos", self._on_end)
-        self.pipeline.set_state(Gst.State.PLAYING)
+        self.pipeline.set_state(Gst.State.PLAYING if (self.active or self._one_shot) else Gst.State.PAUSED)
 
-    # streaming thread
+    # ---- streaming thread ----
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
         if sample is None:
             return Gst.FlowReturn.OK
+        now = time.monotonic()
+        if now - self._last < 1 / MAX_FPS and not self._one_shot:
+            return Gst.FlowReturn.OK  # over the frame cap: drop before copying anything
+        self._last = now
         caps = sample.get_caps()
         if self._caps is None or not caps.is_equal(self._caps):
-            self._caps, self._info = caps, GstVideo.VideoInfo.new_from_caps(caps)
+            info = GstVideo.VideoInfo.new_from_caps(caps)
+            self._caps, self._info = caps, info
+            self._fmt = _GDK_FORMAT.get(info.finfo.format, Gdk.MemoryFormat.B8G8R8A8)
         info, buf = self._info, sample.get_buffer()
-        data = buf.extract_dup(0, buf.get_size())
-        tex = Gdk.MemoryTexture.new(info.width, info.height, Gdk.MemoryFormat.B8G8R8A8,
-                                    GLib.Bytes.new(data), info.stride[0])
+        tex = Gdk.MemoryTexture.new(info.width, info.height, self._fmt,
+                                    GLib.Bytes.new(buf.extract_dup(0, buf.get_size())), info.stride[0])
         self._pending = tex
         if not self._scheduled:
             self._scheduled = True
             GLib.idle_add(self._flush)
         return Gst.FlowReturn.OK
 
-    # main thread
+    # ---- main thread ----
     def _flush(self):
         self._scheduled = False
         tex, self._pending = self._pending, None
         if tex is not None and self.alive:
+            self._got_frame = True
             self.paintable.set_texture(tex)
             self.emit("frame")
+            if self._one_shot and not self.active:
+                self._one_shot = False
+                self.pipeline.set_state(Gst.State.PAUSED)
         return GLib.SOURCE_REMOVE
+
+    def set_active(self, on: bool) -> None:
+        if not self.alive or on == self.active:
+            return
+        self.active = on
+        self._one_shot = False
+        self.pipeline.set_state(Gst.State.PLAYING if on else Gst.State.PAUSED)
+
+    def snapshot(self) -> None:
+        """Grab a single fresh frame for a paused (off-stage) window's thumbnail."""
+        if self.alive and not self.active and not self._one_shot:
+            self._one_shot = True
+            self.pipeline.set_state(Gst.State.PLAYING)
+
+    def _teardown(self) -> None:
+        self.pipeline.set_state(Gst.State.NULL)
+        self.pipeline.get_bus().remove_signal_watch()
+
+    def _on_error(self, _bus, msg):
+        # compositor offered a format we didn't ask for: retry once with videoconvert
+        if self.alive and not self._got_frame and self._spare_fd is not None:
+            fd, self._spare_fd = self._spare_fd, None
+            self._teardown()
+            self._build(_SLOW, fd)
+            return
+        self._on_end()
 
     def _on_end(self, *_):
         if self.alive:
@@ -121,5 +185,7 @@ class Stream(GObject.Object):
 
     def stop(self) -> None:
         self.alive = False
-        self.pipeline.set_state(Gst.State.NULL)
-        self.pipeline.get_bus().remove_signal_watch()
+        self._teardown()
+        if self._spare_fd is not None:
+            os.close(self._spare_fd)
+            self._spare_fd = None
