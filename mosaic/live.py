@@ -4,7 +4,8 @@ The same paintable is drawn by the pool thumbnail, the preview and the output,
 so each frame is copied once and only re-drawn by GTK.
 
 Cost control:
-  - frames come straight from PipeWire as BGRx/BGRA, no videoconvert pass
+  - frames stay on the GPU as DMA-BUFs when PipeWire offers them (the usual case)
+  - otherwise frames come straight from PipeWire as BGRx/BGRA, no videoconvert pass
     (falls back to videoconvert only if the compositor offers something else)
   - at most MAX_FPS frames per second are copied; the rest are dropped before
     any copy happens
@@ -20,11 +21,12 @@ import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
+gi.require_version("GstAllocators", "1.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Graphene", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GLib, GObject, Graphene, Gst, GstVideo  # noqa: E402
+from gi.repository import Gdk, GLib, GObject, Graphene, Gst, GstAllocators, GstVideo  # noqa: E402
 
 Gst.init(None)
 
@@ -33,12 +35,24 @@ MAX_FPS = 30
 _PLACEHOLDER = Gdk.RGBA()
 _PLACEHOLDER.parse("#2a2c33")
 
+# GPU path: frames stay on the graphics card as DMA-BUFs and GTK draws them directly
+# (no CPU copy). Verified on GNOME 46 / PipeWire 1.0.5: linear layout, BGRA.
+_GPU = ("pipewiresrc fd={fd} path={node} do-timestamp=true keepalive-time=1000 "
+        "! video/x-raw(memory:DMABuf),format=(string){{BGRx,BGRA}} "
+        "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
 _FAST = ("pipewiresrc fd={fd} path={node} do-timestamp=true keepalive-time=1000 "
          "! video/x-raw,format=(string){{BGRx,BGRA}} "
          "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
 _SLOW = ("pipewiresrc fd={fd} path={node} do-timestamp=true keepalive-time=1000 "
          "! videoconvert ! video/x-raw,format=BGRA "
          "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+
+def _fourcc(s: str) -> int:
+    return ord(s[0]) | ord(s[1]) << 8 | ord(s[2]) << 16 | ord(s[3]) << 24
+
+
+_DRM_FORMAT = {"BGRA": _fourcc("AR24"), "BGRx": _fourcc("XR24")}  # little-endian ARGB/XRGB8888
+_MODES = (_GPU, _FAST, _SLOW)  # tried in order until one delivers frames
 
 _GDK_FORMAT = {
     GstVideo.VideoFormat.BGRX: Gdk.MemoryFormat.B8G8R8X8,
@@ -113,12 +127,18 @@ class Stream(GObject.Object):
         self._last = 0.0
         self._got_frame = False
         self._node = node_id
-        self._spare_fd = os.dup(fd)  # kept for one rebuild with videoconvert, if needed
+        self._spare_fd = os.dup(fd)  # dup'd again for each fallback rebuild
+        self._mode = 0
         self.pipeline = None
-        self._build(_FAST, os.dup(fd))
+        self._build()
 
-    def _build(self, template: str, fd: int) -> None:
-        self.pipeline = Gst.parse_launch(template.format(fd=fd, node=self._node))
+    @property
+    def on_gpu(self) -> bool:
+        return _MODES[self._mode] is _GPU
+
+    def _build(self) -> None:
+        fd = os.dup(self._spare_fd)
+        self.pipeline = Gst.parse_launch(_MODES[self._mode].format(fd=fd, node=self._node))
         self.pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
@@ -141,18 +161,55 @@ class Stream(GObject.Object):
             self._caps, self._info = caps, info
             self._fmt = _GDK_FORMAT.get(info.finfo.format, Gdk.MemoryFormat.B8G8R8A8)
         info, buf = self._info, sample.get_buffer()
-        tex = Gdk.MemoryTexture.new(info.width, info.height, self._fmt,
-                                    GLib.Bytes.new(buf.extract_dup(0, buf.get_size())), info.stride[0])
-        self._pending = tex
+        if self.on_gpu:
+            self._pending = sample  # turned into a texture on the main thread; holds the buffer
+        else:
+            self._pending = Gdk.MemoryTexture.new(info.width, info.height, self._fmt,
+                                                  GLib.Bytes.new(buf.extract_dup(0, buf.get_size())),
+                                                  info.stride[0])
         if not self._scheduled:
             self._scheduled = True
             GLib.idle_add(self._flush)
         return Gst.FlowReturn.OK
 
     # ---- main thread ----
+    def _dmabuf_texture(self, sample) -> Gdk.Texture:
+        buf, info = sample.get_buffer(), self._info
+        vm = GstVideo.buffer_get_video_meta(buf)
+        b = Gdk.DmabufTextureBuilder()
+        b.set_display(Gdk.Display.get_default())
+        b.set_width(info.width)
+        b.set_height(info.height)
+        b.set_fourcc(_DRM_FORMAT[info.finfo.name])
+        b.set_modifier(0)  # DRM_FORMAT_MOD_LINEAR
+        b.set_n_planes(1)
+        b.set_fd(0, GstAllocators.dmabuf_memory_get_fd(buf.peek_memory(0)))
+        b.set_stride(0, vm.stride[0] if vm else info.stride[0])
+        b.set_offset(0, vm.offset[0] if vm else 0)
+        held = [sample]  # keeps the PipeWire buffer alive until GTK is done with the texture
+        tex = b.build(lambda *_: held.clear(), 1)  # pygobject: data must be a non-NULL int
+        if tex is None:
+            raise GLib.Error("dmabuf import failed")
+        return tex
+
+    def _fall_back(self) -> None:
+        """Rebuild with the next, more conservative pipeline (GPU -> plain memory -> videoconvert)."""
+        if self._mode + 1 >= len(_MODES):
+            return self._on_end()
+        self._mode += 1
+        self._teardown()
+        self._build()
+
     def _flush(self):
         self._scheduled = False
         tex, self._pending = self._pending, None
+        if isinstance(tex, Gst.Sample):
+            try:
+                tex = self._dmabuf_texture(tex)
+            except (GLib.Error, KeyError, TypeError) as e:
+                print(f"{self.src_id}: GPU frames unavailable ({e}), using plain memory", flush=True)
+                self._fall_back()
+                return GLib.SOURCE_REMOVE
         if tex is not None and self.alive:
             self._got_frame = True
             self.paintable.set_texture(tex)
@@ -196,12 +253,9 @@ class Stream(GObject.Object):
         self.pipeline.get_bus().remove_signal_watch()
 
     def _on_error(self, _bus, msg):
-        # compositor offered a format we didn't ask for: retry once with videoconvert
-        if self.alive and not self._got_frame and self._spare_fd is not None:
-            fd, self._spare_fd = self._spare_fd, None
-            self._teardown()
-            self._build(_SLOW, fd)
-            return
+        # before the first frame an error means the format didn't negotiate: try the next mode
+        if self.alive and not self._got_frame:
+            return self._fall_back()
         self._on_end()
 
     def _on_end(self, *_):
