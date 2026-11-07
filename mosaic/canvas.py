@@ -6,6 +6,8 @@ from the pool onto it to add or swap).
 """
 from __future__ import annotations
 
+import os
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -25,7 +27,21 @@ def _rgba(s: str) -> Gdk.RGBA:
 BLACK, DESK = _rgba("#000000"), _rgba("#17181c")
 EDGE, ACCENT = _rgba("rgba(255,255,255,0.18)"), _rgba("#78aeff")
 EMPTY, LABEL_BG, LABEL_FG = _rgba("#2a2c33"), _rgba("rgba(0,0,0,0.6)"), _rgba("#e8e9ec")
+EDGE_TEXT = _rgba("rgba(255,255,255,0.45)")
 HANDLE = 16  # widget px
+LOGO_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data",
+                         "io.github.iamzainrizwan.mosaic.svg")
+_logo = None
+
+
+def logo() -> Gdk.Texture | None:
+    global _logo
+    if _logo is None:
+        try:
+            _logo = Gdk.Texture.new_from_filename(LOGO_FILE)
+        except Exception:  # noqa: BLE001  (missing file or no svg loader: just skip the logo)
+            _logo = False
+    return _logo or None
 
 
 def _rect(x, y, w, h) -> Graphene.Rect:
@@ -71,6 +87,8 @@ class Canvas(Gtk.Widget):
         stage = _rect(ox, oy, CANVAS_W * s, CANVAS_H * s)
         snap.append_color(BLACK, stage)
         lay = self.ctx.state.layout()
+        if not lay.tiles:
+            self._empty(snap, ox, oy, CANVAS_W * s, CANVAS_H * s)
         snap.push_clip(stage)
         for i, t in enumerate(lay.tiles):
             x, y, w, h = ox + t.x * s, oy + t.y * s, t.w * s, t.h * s
@@ -87,6 +105,24 @@ class Canvas(Gtk.Widget):
             if self.editable:
                 self._chrome(snap, i, t, x, y, w, h, missing=tex is None)
         snap.pop()
+
+    def _empty(self, snap, x, y, w, h) -> None:
+        """mosaic logo (plus a hint in the editor) while the layout has no tiles."""
+        tex = logo()
+        size = min(w, h) * 0.22
+        cy = y + h / 2 - (size * 0.15 if self.editable else 0)
+        if tex is not None:
+            snap.save()
+            snap.translate(_pt(x + (w - size) / 2, cy - size / 2))
+            tex.snapshot(snap, size, size)
+            snap.restore()
+        if self.editable:
+            lay = self.create_pango_layout("mosaic: drag a window here from the pool")
+            lw, lh = lay.get_pixel_size()
+            snap.save()
+            snap.translate(_pt(x + (w - lw) / 2, cy + size / 2 + 12))
+            snap.append_layout(lay, EDGE_TEXT)
+            snap.restore()
 
     def _chrome(self, snap, i, t, x, y, w, h, missing) -> None:
         sel = i == self.ctx.selected

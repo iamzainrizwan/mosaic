@@ -214,3 +214,24 @@ def fit_contain(pw: float, ph: float, w: float, h: float) -> tuple[float, float,
     k = min(w / pw, h / ph)
     dw, dh = pw * k, ph * k
     return (w - dw) / 2, (h - dh) / 2, dw, dh
+
+
+def match_window(size, windows: list[dict], tol: int = 2) -> str:
+    """Name for a captured window of `size` (from the portal), given the open windows
+    listed by the mosaic-windows shell extension. "" if no single clear match."""
+    if not size or len(size) != 2:
+        return ""
+    W, H = size
+
+    def fits(w: dict) -> bool:
+        k = w.get("scale") or 1
+        for key in ("frame", "buffer"):
+            ww, hh = w.get(key) or (0, 0)
+            for mult in (1, k):
+                if abs(ww * mult - W) <= tol and abs(hh * mult - H) <= tol:
+                    return True
+        return False
+
+    names = {(w.get("title") or w.get("app") or "").strip() for w in windows if fits(w)}
+    names.discard("")
+    return names.pop() if len(names) == 1 else ""

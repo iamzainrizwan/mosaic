@@ -24,6 +24,7 @@ from .live import Stream  # noqa: E402
 from .portal import ScreenCast  # noqa: E402
 
 APP_ID = "io.github.iamzainrizwan.mosaic"
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 
 PORTAL_LOG = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "mosaic", "portal.log")
@@ -36,6 +37,18 @@ def title_of(props: dict) -> str:
         if isinstance(v, str) and v.strip():
             return v.strip()
     return ""
+
+
+def open_windows() -> list[dict]:
+    """Open windows from the mosaic-windows shell extension ([] if it isn't enabled)."""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        v = bus.call_sync("org.gnome.Shell", "/io/github/iamzainrizwan/Mosaic",
+                          "io.github.iamzainrizwan.Mosaic", "GetWindows", None,
+                          GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 500, None)
+        return json.loads(v.unpack()[0])
+    except (GLib.Error, ValueError):
+        return []
 
 
 def log_portal_reply(streams, restoring: bool) -> None:
@@ -108,9 +121,11 @@ class Ctx:
         def ready(streams, open_remote, token):
             sess.token = token or sess.token
             log_portal_reply(streams, restoring)
+            wins = open_windows() if len(sess.names) < len(streams) else []
             for i, (node_id, props) in enumerate(streams):
                 while len(sess.names) <= i:
-                    sess.names.append(title_of(props) or f"window {self.state.next_window_number()}")
+                    sess.names.append(title_of(props) or model.match_window(props.get("size"), wins)
+                                      or f"window {self.state.next_window_number()}")
                 if i in sess.hidden:
                     continue
                 try:
@@ -483,6 +498,9 @@ class MosaicApp(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+        # window icon straight from the repo, so it shows even without ./install.sh
+        Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(DATA_DIR)
+        Gtk.Window.set_default_icon_name(APP_ID)
         self.ctx = Ctx()
         output = OutputWindow(self, self.ctx)
         self.control = ControlWindow(self, self.ctx, output)

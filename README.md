@@ -4,7 +4,7 @@ tile live app windows onto one 1920×1080 stage, flip between saved layouts, and
 screenshare just that stage. a small, single-purpose take on what OBS scenes do,
 for GNOME on Wayland.
 
-- **pool**: pick several windows at once in GNOME's picker; each becomes a live feed
+- **pool**: add windows through GNOME's picker; each becomes a live, named feed
 - **layouts**: which window goes where and how big; switch between them with one click
 - **swap**: drag a different window onto a tile to replace it, keeping the slot
 - **output**: a clean window with nothing but the stage. park it on another workspace,
@@ -26,9 +26,16 @@ mosaic
 
 or without installing: `python3 -m mosaic` from the repo.
 
+**window names:** GNOME's picker doesn't tell apps which window you chose, only its
+size. `install.sh` also installs a tiny shell extension (`extension/`) that lists open
+windows over D-Bus, and mosaic names each new capture by matching sizes. On Wayland
+a new extension only loads after you log out and back in once; run `./install.sh`
+again after that to enable it. Without it, windows are "window 1, 2, …" and you
+rename them in the pool. Note: GNOME 46's picker takes one window per pick.
+
 ## use
 
-1. open the apps you want to show, then **add windows** and tick them all
+1. open the apps you want to show, then **add windows** once per window
 2. drag windows from the pool onto the stage. drag to move, pull the bottom-right
    corner to resize. tiles snap to edges, thirds, the centre and each other
 3. make more layouts (new / duplicate) and click between them

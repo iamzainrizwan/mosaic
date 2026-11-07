@@ -44,6 +44,27 @@ class Geometry(unittest.TestCase):
         self.assertEqual(lay.hit(1500, 900), -1)
 
 
+class Naming(unittest.TestCase):
+    WINS = [
+        {"title": "Desmos | Graphing", "app": "Zen", "frame": [1704, 1065], "buffer": [1756, 1117], "scale": 1},
+        {"title": "deck.pptx - ONLYOFFICE", "app": "ONLYOFFICE", "frame": [1920, 1080], "buffer": [1920, 1080], "scale": 1},
+        {"title": "tm tutoring", "app": "kitty", "frame": [800, 600], "buffer": [800, 600], "scale": 2},
+    ]
+
+    def test_unique_size_match(self):
+        self.assertEqual(model.match_window([1704, 1065], self.WINS), "Desmos | Graphing")
+        self.assertEqual(model.match_window([1756, 1117], self.WINS), "Desmos | Graphing")  # buffer size
+        self.assertEqual(model.match_window([1600, 1200], self.WINS), "tm tutoring")        # hidpi
+        self.assertEqual(model.match_window([1703, 1066], self.WINS), "Desmos | Graphing")  # tolerance
+
+    def test_ambiguous_or_missing(self):
+        twins = self.WINS + [{"title": "other", "frame": [1920, 1080], "buffer": [1920, 1080]}]
+        self.assertEqual(model.match_window([1920, 1080], twins), "")
+        self.assertEqual(model.match_window([10, 10], self.WINS), "")
+        self.assertEqual(model.match_window(None, self.WINS), "")
+        self.assertEqual(model.match_window([1704, 1065], []), "")
+
+
 class Persistence(unittest.TestCase):
     def test_roundtrip_and_layout_ops(self):
         st = State()
